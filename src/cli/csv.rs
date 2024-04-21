@@ -1,22 +1,7 @@
-use anyhow::Ok;
 use clap::Parser;
-use std::{fmt::Display, path::Path, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
-#[derive(Debug, Parser)]
-#[command(name = "rcli", version, about, long_about = None)]
-pub struct Opts {
-    #[command(subcommand)]
-    pub cmd: SubCommand,
-}
-
-#[derive(Debug, Parser)]
-pub enum SubCommand {
-    #[command(name = "csv", about = "Show CSV, or Convert CSV to other Formats")]
-    Csv(CsvOpts),
-
-    #[command(name = "genpass", about = "Generate a random password")]
-    GenPass(GenPassOpts),
-}
+use super::verify_input_file;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -41,33 +26,6 @@ pub struct CsvOpts {
     #[arg(long, default_value_t = true)]
     pub header: bool,
 }
-
-#[derive(Debug, Parser)]
-pub struct GenPassOpts {
-    #[arg(short, long, default_value_t = 16)]
-    pub length: u8,
-
-    #[arg(long, default_value_t = true)]
-    pub uppercase: bool,
-
-    #[arg(long, default_value_t = true)]
-    pub lowercase: bool,
-
-    #[arg(long, default_value_t = true)]
-    pub number: bool,
-
-    #[arg(long, default_value_t = true)]
-    pub symbol: bool,
-}
-
-fn verify_input_file(file_name: &str) -> Result<String, anyhow::Error> {
-    if Path::new(file_name).exists() {
-        Ok(file_name.into())
-    } else {
-        Err(anyhow::anyhow!("File does not exits!"))
-    }
-}
-
 fn parse_format(format: &str) -> Result<OutputFormat, anyhow::Error> {
     format.parse()
 }
