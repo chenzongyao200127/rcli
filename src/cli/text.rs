@@ -5,9 +5,11 @@ use anyhow::Ok;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use clap::Parser;
 use core::fmt;
+use enum_dispatch::enum_dispatch;
 use std::{path::PathBuf, str::FromStr};
 
 #[derive(Debug, Parser)]
+#[enum_dispatch(CmdExcutor)]
 pub enum TextSubCommand {
     #[command(about = "Sign a message with a private key/shared key")]
     Sign(TextSignOpts),
@@ -126,15 +128,5 @@ impl CmdExcutor for TextKeyGenerateOpts {
             tokio::fs::write(name, key).await?;
         }
         Ok(())
-    }
-}
-
-impl CmdExcutor for TextSubCommand {
-    async fn execute(self) -> anyhow::Result<()> {
-        match self {
-            TextSubCommand::Sign(opts) => opts.execute().await,
-            TextSubCommand::Verify(opts) => opts.execute().await,
-            TextSubCommand::Generate(opts) => opts.execute().await,
-        }
     }
 }
