@@ -4,6 +4,8 @@ GET http://localhost:8080/
 
 ### Test index page
 GET http://localhost:8080/Cargo.toml
+Accept-Encoding: GZIP
+Range: bytes=0-200
 
 ### Test index page
 GET http://localhost:8080/abc.txt
@@ -13,4 +15,4 @@ GET http://localhost:8080/fixtures/blake3.txt
 
 
 ### Test index page
-GET http://localhost:8080/fixtures/ed25519.sk
+GET http://localhost:8080/fixtures/
