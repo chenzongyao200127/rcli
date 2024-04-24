@@ -1,228 +1,184 @@
-use std::{fs, io::Read, path::Path};
-
-use anyhow::{Ok, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use crate::{process_genpass, TextSignFormat};
+use anyhow::Result;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
+use std::{collections::HashMap, io::Read};
 
-use crate::{get_reader, process_genpass, TextSignFormat};
-
-pub trait TextSign {
-    /// Sign the data from the reader and return the signature
+pub trait TextSigner {
+    // signer could sign any input data
     fn sign(&self, reader: &mut dyn Read) -> Result<Vec<u8>>;
 }
 
-pub trait TextVerify {
-    fn verify(&self, reader: impl Read, sig: &[u8]) -> Result<bool>;
+pub trait TextVerifier {
+    // verifier could verify any input data
+    fn verify(&self, reader: &mut dyn Read, sig: &[u8]) -> Result<bool>;
 }
 
-struct Blake3 {
+pub struct Blake3 {
     key: [u8; 32],
 }
 
-struct Ed25519Signer {
+pub struct Ed25519Signer {
     key: SigningKey,
 }
 
-struct Ed25519Verifier {
+pub struct Ed25519Verifier {
     key: VerifyingKey,
 }
 
-pub fn process_text_sign(input: &str, key: &str, format: TextSignFormat) -> Result<String> {
-    let mut reader = get_reader(input)?;
+impl TextSigner for Blake3 {
+    fn sign(&self, reader: &mut dyn Read) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        let ret = blake3::keyed_hash(&self.key, &buf);
+        Ok(ret.as_bytes().to_vec())
+    }
+}
 
-    let signed = match format {
-        TextSignFormat::Blake3 => {
-            let singer = Blake3::load(key)?;
-            singer.sign(&mut reader)?
-        }
-        TextSignFormat::Ed25519 => {
-            let singer = Ed25519Signer::load(key)?;
-            singer.sign(&mut reader)?
-        }
+impl TextVerifier for Blake3 {
+    fn verify(&self, reader: &mut dyn Read, sig: &[u8]) -> Result<bool> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        let ret = blake3::keyed_hash(&self.key, &buf);
+        Ok(ret.as_bytes() == sig)
+    }
+}
+
+impl TextSigner for Ed25519Signer {
+    fn sign(&self, reader: &mut dyn Read) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        let signature = self.key.sign(&buf);
+        Ok(signature.to_bytes().to_vec())
+    }
+}
+
+impl TextVerifier for Ed25519Verifier {
+    fn verify(&self, reader: &mut dyn Read, sig: &[u8]) -> Result<bool> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        let sig = (&sig[..64]).try_into()?;
+        let signature = Signature::from_bytes(sig);
+        Ok(self.key.verify(&buf, &signature).is_ok())
+    }
+}
+
+impl Blake3 {
+    pub fn try_new(key: impl AsRef<[u8]>) -> Result<Self> {
+        let key = key.as_ref();
+        // convert &[u8] to &[u8; 32]
+        let key = (&key[..32]).try_into()?;
+        Ok(Self::new(key))
+    }
+
+    pub fn new(key: [u8; 32]) -> Self {
+        Self { key }
+    }
+
+    fn generate() -> Result<HashMap<&'static str, Vec<u8>>> {
+        let key = process_genpass(32, true, true, true, true)?;
+        let mut map = HashMap::new();
+        map.insert("blake3.txt", key.as_bytes().to_vec());
+        Ok(map)
+    }
+}
+
+impl Ed25519Signer {
+    pub fn try_new(key: impl AsRef<[u8]>) -> Result<Self> {
+        let key = key.as_ref();
+        let key = (&key[..32]).try_into()?;
+        Ok(Self::new(key))
+    }
+
+    pub fn new(key: &[u8; 32]) -> Self {
+        let key = SigningKey::from_bytes(key);
+        Self { key }
+    }
+
+    fn generate() -> Result<HashMap<&'static str, Vec<u8>>> {
+        let mut csprng = OsRng;
+        let sk: SigningKey = SigningKey::generate(&mut csprng);
+        let pk: VerifyingKey = (&sk).into();
+        let mut map = HashMap::new();
+        map.insert("ed25519.sk", sk.to_bytes().to_vec());
+        map.insert("ed25519.pk", pk.to_bytes().to_vec());
+
+        Ok(map)
+    }
+}
+
+impl Ed25519Verifier {
+    pub fn try_new(key: impl AsRef<[u8]>) -> Result<Self> {
+        let key = key.as_ref();
+        let key = (&key[..32]).try_into()?;
+        let key = VerifyingKey::from_bytes(key)?;
+        Ok(Self { key })
+    }
+}
+
+pub fn process_text_sign(
+    reader: &mut dyn Read,
+    key: &[u8], // (ptr, length)
+    format: TextSignFormat,
+) -> Result<Vec<u8>> {
+    let signer: Box<dyn TextSigner> = match format {
+        TextSignFormat::Blake3 => Box::new(Blake3::try_new(key)?),
+        TextSignFormat::Ed25519 => Box::new(Ed25519Signer::try_new(key)?),
     };
-    let signed = URL_SAFE_NO_PAD.encode(signed);
-    Ok(signed)
+
+    signer.sign(reader)
 }
 
 pub fn process_text_verify(
-    input: &str,
-    key: &str,
+    reader: &mut dyn Read,
+    key: &[u8],
+    sig: &[u8],
     format: TextSignFormat,
-    sig: &str,
 ) -> Result<bool> {
-    let mut reader = get_reader(input)?;
-    let sig = URL_SAFE_NO_PAD.decode(sig)?;
-
-    let verified = match format {
-        TextSignFormat::Blake3 => {
-            let verifier = Blake3::load(key)?;
-            verifier.verify(&mut reader, &sig)?
-        }
-        TextSignFormat::Ed25519 => {
-            let verifier = Ed25519Verifier::load(key)?;
-            verifier.verify(&mut reader, &sig)?
-        }
+    let verifier: Box<dyn TextVerifier> = match format {
+        TextSignFormat::Blake3 => Box::new(Blake3::try_new(key)?),
+        TextSignFormat::Ed25519 => Box::new(Ed25519Verifier::try_new(key)?),
     };
-    Ok(verified)
+    verifier.verify(reader, sig)
 }
 
-pub fn process_text_generate(format: TextSignFormat) -> Result<Vec<Vec<u8>>> {
+pub fn process_text_key_generate(format: TextSignFormat) -> Result<HashMap<&'static str, Vec<u8>>> {
     match format {
         TextSignFormat::Blake3 => Blake3::generate(),
         TextSignFormat::Ed25519 => Ed25519Signer::generate(),
     }
 }
 
-impl TextSign for Blake3 {
-    fn sign(&self, reader: &mut dyn Read) -> Result<Vec<u8>> {
-        // TODO: improve perf by reading in chunks
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
-        Ok(blake3::keyed_hash(&self.key, &buf).as_bytes().to_vec())
-    }
-}
-
-impl TextSign for Ed25519Signer {
-    fn sign(&self, reader: &mut dyn Read) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
-        let sig = self.key.sign(&buf);
-        Ok(sig.to_bytes().to_vec())
-    }
-}
-
-impl TextVerify for Blake3 {
-    fn verify(&self, mut reader: impl Read, sig: &[u8]) -> Result<bool> {
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
-        let hash = blake3::keyed_hash(&self.key, &buf);
-        let hash = hash.as_bytes();
-        Ok(hash == sig)
-    }
-}
-
-pub trait KeyLoader {
-    fn load(path: impl AsRef<Path>) -> Result<Self>
-    where
-        Self: Sized;
-}
-
-pub trait KeyGenerator {
-    fn generate() -> Result<Vec<Vec<u8>>>;
-}
-
-impl TextVerify for Ed25519Verifier {
-    fn verify(&self, mut reader: impl Read, sig: &[u8]) -> Result<bool> {
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf)?;
-        let sig = Signature::from_bytes(sig.try_into()?);
-        let ret = self.key.verify(&buf, &sig).is_ok();
-        Ok(ret)
-    }
-}
-
-impl KeyLoader for Blake3 {
-    fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let key = fs::read(path)?;
-        Self::try_new(&key)
-    }
-}
-
-impl KeyLoader for Ed25519Signer {
-    fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let key = fs::read(path)?;
-        Self::try_new(&key)
-    }
-}
-
-impl KeyLoader for Ed25519Verifier {
-    fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let key = fs::read(path)?;
-        Self::try_new(&key)
-    }
-}
-
-impl KeyGenerator for Blake3 {
-    fn generate() -> Result<Vec<Vec<u8>>> {
-        let key = process_genpass(32, true, true, true, true)?;
-        let key = key.as_bytes().to_vec();
-        Ok(vec![key])
-    }
-}
-
-impl KeyGenerator for Ed25519Signer {
-    fn generate() -> Result<Vec<Vec<u8>>> {
-        let mut csprng = OsRng;
-        let sk = SigningKey::generate(&mut csprng);
-        let pk = sk.verifying_key().to_bytes().to_vec();
-        let sk = sk.to_bytes().to_vec();
-
-        Ok(vec![sk, pk])
-    }
-}
-
-impl Blake3 {
-    pub fn new(key: [u8; 32]) -> Self {
-        Self { key }
-    }
-
-    pub fn try_new(key: &[u8]) -> Result<Self> {
-        let key = &key[..32];
-        let key = key.try_into()?;
-        let singer = Blake3::new(key);
-        Ok(singer)
-    }
-}
-
-impl Ed25519Signer {
-    pub fn new(key: SigningKey) -> Self {
-        Self { key }
-    }
-
-    pub fn try_new(key: &[u8]) -> Result<Self> {
-        let key = key.try_into()?;
-        let key = SigningKey::from_bytes(key);
-        let signer = Ed25519Signer::new(key);
-        Ok(signer)
-    }
-}
-
-impl Ed25519Verifier {
-    pub fn new(key: VerifyingKey) -> Self {
-        Self { key }
-    }
-
-    pub fn try_new(key: &[u8]) -> Result<Self> {
-        let key = key.try_into()?;
-        let key = VerifyingKey::from_bytes(key)?;
-        let signer = Ed25519Verifier::new(key);
-        Ok(signer)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+    const KEY: &[u8] = include_bytes!("../../fixtures/blake3.txt");
 
     #[test]
-    fn test_blake3_sign_verify() -> Result<()> {
-        let blake3 = Blake3::load("fixtures/blake3.txt")?;
-        let data = b"hello world";
-        let sig = blake3.sign(&mut &data[..]).unwrap();
-        println!("sig: {:?}", URL_SAFE_NO_PAD.encode(&sig));
-        assert!(blake3.verify(&mut &data[..], &sig).unwrap());
+    fn test_process_text_sign() -> Result<()> {
+        let mut reader = "hello".as_bytes();
+        let mut reader1 = "hello".as_bytes();
+        let format = TextSignFormat::Blake3;
+        let sig = process_text_sign(&mut reader, KEY, format)?;
+        let ret = process_text_verify(&mut reader1, KEY, &sig, format)?;
+        assert!(ret);
         Ok(())
     }
 
     #[test]
-    fn test_ed25519_sign_verify() -> Result<()> {
-        let sk = Ed25519Signer::load("fixtures/ed25519.sk")?;
-        let pk = Ed25519Verifier::load("fixtures/ed25519.pk")?;
-
-        let data = b"hello world";
-        let sig = sk.sign(&mut &data[..])?;
-        assert!(pk.verify(&data[..], &sig)?);
+    fn test_process_text_verify() -> Result<()> {
+        let mut reader = "hello".as_bytes();
+        let format = TextSignFormat::Blake3;
+        let sig = "33Ypo4rveYpWmJKAiGnnse-wHQhMVujjmcVkV4Tl43k";
+        let sig = URL_SAFE_NO_PAD.decode(sig)?;
+        let ret = process_text_verify(&mut reader, KEY, &sig, format)?;
+        if ret {
+            println!("Signature is valid");
+        } else {
+            println!("Signature is invalid");
+        }
         Ok(())
     }
 }

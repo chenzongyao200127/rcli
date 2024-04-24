@@ -1,5 +1,8 @@
+use crate::{get_reader, CmdExcutor};
+
 use super::{verify_file, verify_path};
 use anyhow::Ok;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use clap::Parser;
 use core::fmt;
 use std::{path::PathBuf, str::FromStr};
@@ -86,5 +89,52 @@ impl From<TextSignFormat> for &'static str {
 impl fmt::Display for TextSignFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", Into::<&'static str>::into(*self))
+    }
+}
+
+impl CmdExcutor for TextSignOpts {
+    async fn execute(self) -> anyhow::Result<()> {
+        let mut reader = get_reader(&self.input)?;
+        let key = crate::get_content(&self.key)?;
+        let sig = crate::process_text_sign(&mut reader, &key, self.format)?;
+        let encoded = URL_SAFE_NO_PAD.encode(sig);
+        println!("{}", encoded);
+        Ok(())
+    }
+}
+
+impl CmdExcutor for TextVerifyOpts {
+    async fn execute(self) -> anyhow::Result<()> {
+        let mut reader = get_reader(&self.input)?;
+        let key = crate::get_content(&self.key)?;
+        let sig = URL_SAFE_NO_PAD.decode(&self.sig)?;
+        let valid = crate::process_text_verify(&mut reader, &key, &sig, self.format)?;
+        if valid {
+            println!("Signature is valid");
+        } else {
+            println!("Signature is invalid");
+        }
+        Ok(())
+    }
+}
+
+impl CmdExcutor for TextKeyGenerateOpts {
+    async fn execute(self) -> anyhow::Result<()> {
+        let keys = crate::process_text_key_generate(self.format)?;
+        for (name, key) in keys {
+            let name = self.output.join(name);
+            tokio::fs::write(name, key).await?;
+        }
+        Ok(())
+    }
+}
+
+impl CmdExcutor for TextSubCommand {
+    async fn execute(self) -> anyhow::Result<()> {
+        match self {
+            TextSubCommand::Sign(opts) => opts.execute().await,
+            TextSubCommand::Verify(opts) => opts.execute().await,
+            TextSubCommand::Generate(opts) => opts.execute().await,
+        }
     }
 }
