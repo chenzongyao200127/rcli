@@ -1,0 +1,16 @@
+### Test index page
+
+GET http://localhost:8080/
+
+### Test index page
+GET http://localhost:8080/Cargo.toml
+
+### Test index page
+GET http://localhost:8080/abc.txt
+
+### Test index page
+GET http://localhost:8080/fixtures/blake3.txt
+
+
+### Test index page
+GET http://localhost:8080/fixtures/ed25519.sk

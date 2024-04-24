@@ -3,12 +3,15 @@ use std::fs;
 // rcli cxv -i input.csv -o output.json --header -d ','
 use clap::Parser;
 use rcli::{
-    process_csv, process_decode, process_encode, process_genpass, process_text_generate,
-    process_text_sign, process_text_verify, Opts, SubCommand,
+    process_csv, process_decode, process_encode, process_genpass, process_http_serve,
+    process_text_generate, process_text_sign, process_text_verify, HttpSubCommand, Opts,
+    SubCommand,
 };
 use zxcvbn::zxcvbn;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
     let opts = Opts::parse();
 
     match opts.cmd {
@@ -70,6 +73,10 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        },
+
+        SubCommand::Http(subcmd) => match subcmd {
+            HttpSubCommand::Serve(opts) => process_http_serve(opts.dir, opts.port).await?,
         },
     }
 
