@@ -1,7 +1,10 @@
-use crate::{process_genpass, TextSignFormat};
+use crate::{process_genpass, TextEncryptFormat, TextSignFormat};
 use anyhow::Result;
+use chacha20poly1305::{
+    aead::{generic_array::GenericArray, Aead, AeadCore, KeyInit, OsRng},
+    XChaCha20Poly1305,
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
 use std::{collections::HashMap, io::Read};
 
 pub trait TextSigner {
@@ -24,6 +27,14 @@ pub struct Ed25519Signer {
 
 pub struct Ed25519Verifier {
     key: VerifyingKey,
+}
+
+pub struct XChaCha20Poly1305Encryptor {
+    key: [u8; 32],
+}
+
+pub struct XChaCha20Poly1305Decrypter {
+    key: [u8; 32],
 }
 
 impl TextSigner for Blake3 {
@@ -60,6 +71,54 @@ impl TextVerifier for Ed25519Verifier {
         let sig = (&sig[..64]).try_into()?;
         let signature = Signature::from_bytes(sig);
         Ok(self.key.verify(&buf, &signature).is_ok())
+    }
+}
+
+pub trait TextEncrypt {
+    fn encrypt(&self, reader: &mut dyn Read) -> Result<Vec<u8>>;
+}
+
+pub trait TextDecrypt {
+    fn decrypt(&self, reader: &mut dyn Read) -> Result<Vec<u8>>;
+}
+
+impl TextEncrypt for XChaCha20Poly1305Encryptor {
+    fn encrypt(&self, reader: &mut dyn Read) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+
+        let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
+            .expect("Key needs to be of correct size for XChaCha20Poly1305");
+
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, buf.as_ref())
+            .expect("Encryption failure!");
+
+        // Combine the nonce and the ciphertext for output
+        let mut output = Vec::with_capacity(nonce.len() + ciphertext.len());
+        output.extend_from_slice(&nonce);
+        output.extend_from_slice(&ciphertext);
+
+        Ok(output)
+    }
+}
+
+impl TextDecrypt for XChaCha20Poly1305Decrypter {
+    fn decrypt(&self, reader: &mut dyn Read) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
+            .expect("Key needs to be of correct size for XChaCha20Poly1305");
+        // Ensure the buffer has enough bytes for extracting the nonce
+        let nonce_size = XChaCha20Poly1305::generate_nonce(&mut OsRng).len();
+        let (nonce_bytes, ciphertext) = buf.split_at(nonce_size);
+        let nonce = GenericArray::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .expect("Decryption failure!");
+
+        Ok(plaintext)
     }
 }
 
@@ -116,6 +175,24 @@ impl Ed25519Verifier {
     }
 }
 
+impl XChaCha20Poly1305Encryptor {
+    pub fn new(key: impl AsRef<[u8]>) -> Self {
+        let key = key.as_ref();
+        // TODO: check key length, if not long enough, extend it
+        let key = (&key[..32]).try_into().unwrap();
+        Self { key }
+    }
+}
+
+impl XChaCha20Poly1305Decrypter {
+    pub fn new(key: impl AsRef<[u8]>) -> Self {
+        let key = key.as_ref();
+        // TODO: check key length, if not long enough, extend it
+        let key = (&key[..32]).try_into().unwrap();
+        Self { key }
+    }
+}
+
 pub fn process_text_sign(
     reader: &mut dyn Read,
     key: &[u8], // (ptr, length)
@@ -149,8 +226,32 @@ pub fn process_text_key_generate(format: TextSignFormat) -> Result<HashMap<&'sta
     }
 }
 
+pub fn process_text_key_encrypt(
+    reader: &mut dyn Read,
+    key: &[u8],
+    format: TextEncryptFormat,
+) -> Result<Vec<u8>> {
+    let encryptor: Box<dyn TextEncrypt> = match format {
+        TextEncryptFormat::XChaCha20Poly1305 => Box::new(XChaCha20Poly1305Encryptor::new(key)),
+    };
+    encryptor.encrypt(reader)
+}
+
+pub fn process_text_key_decrypt(
+    reader: &mut dyn Read,
+    key: &[u8],
+    format: TextEncryptFormat,
+) -> Result<Vec<u8>> {
+    let decrypter: Box<dyn TextDecrypt> = match format {
+        TextEncryptFormat::XChaCha20Poly1305 => Box::new(XChaCha20Poly1305Decrypter::new(key)),
+    };
+    decrypter.decrypt(reader)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
@@ -179,6 +280,28 @@ mod tests {
         } else {
             println!("Signature is invalid");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn text_process_text_key_generate() -> Result<()> {
+        let format = TextSignFormat::Blake3;
+        let map = process_text_key_generate(format)?;
+        assert_eq!(map.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn text_process_text_key_encrypt() -> Result<()> {
+        let mut reader = fs::File::open("Cargo.toml")?;
+        let format = TextEncryptFormat::XChaCha20Poly1305;
+        let key = process_genpass(32, true, true, true, true)?;
+        let key = key.as_bytes();
+        let encrypted = process_text_key_encrypt(&mut reader, key, format)?;
+        let encoded = URL_SAFE_NO_PAD.encode(encrypted);
+        let decoded = URL_SAFE_NO_PAD.decode(encoded)?;
+        let decrypted = process_text_key_decrypt(&mut decoded.as_slice(), key, format)?;
+        assert_eq!(decrypted, fs::read("Cargo.toml")?);
         Ok(())
     }
 }
